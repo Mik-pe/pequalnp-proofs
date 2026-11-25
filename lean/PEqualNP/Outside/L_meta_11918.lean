@@ -4,23 +4,12 @@ namespace PEqualNP.Outside.L_meta_11918
 
 open PEqualNP.CircuitLowerBounds
 
--- The wire-frontier argument follows L-meta-11279 and L-meta-11131.
--- The explicit circuit detects precisely the listed edges.
-private def IsAO (g : Gate) : Prop := g.op = .and ∨ g.op = .or
-
-private def IsAllowed (g : Gate) : Prop :=
-  (g.op = .and ∨ g.op = .or ∨ g.op = .not) ∧ g.inputs.length ≤ 2
-
+-- A binary gate introduces at most one extra input when tracing the output
+-- backwards. A NOT reads only its first input and introduces none.
 private def isOrdinary (g : Gate) : Bool :=
   match g.op with
   | .not => false
   | _ => true
-
-private def eraseNot (gs : List Gate) : List Gate :=
-  gs.map fun g => if isOrdinary g then g else ⟨.or, []⟩
-
-private theorem eraseNot_length (gs : List Gate) : (eraseNot gs).length = gs.length := by
-  simp [eraseNot]
 
 private def step (w : List Bool) (g : Gate) : List Bool :=
   w ++ [g.op.eval (g.inputs.map fun i => w.getD i false)]
@@ -55,198 +44,90 @@ private theorem wire_outside (gs : List Gate) (x : List Bool) {i : ℕ}
   have h' : (wires gs x).length ≤ i := by simpa [wires_length] using h
   simp [List.getD_eq_getElem?_getD, List.getElem?_eq_none h']
 
-private theorem evalAO {g : Gate} (hg : IsAO g) {a b : ℕ → Bool}
-    (le : ∀ i ∈ g.inputs, a i ≤ b i) :
-    g.op.eval (g.inputs.map a) ≤ g.op.eval (g.inputs.map b) := by
-  apply Bool.le_iff_imp.2
-  rcases hg with h | h
-  · simp only [h, GateOp.eval, List.all_map, Function.comp_def, id_eq, List.all_eq_true]
-    exact fun ha i hi => Bool.le_iff_imp.1 (le i hi) (ha i hi)
-  · simp only [h, GateOp.eval, List.any_map, Function.comp_def, id_eq, List.any_eq_true]
-    rintro ⟨i, hi, ha⟩
-    exact ⟨i, hi, Bool.le_iff_imp.1 (le i hi) ha⟩
 
-private theorem wires_le (gs : List Gate) (hgs : ∀ g ∈ gs, IsAO g)
-    (x y : List Bool) (hlen : x.length = y.length)
-    (hxy : ∀ i, x.getD i false ≤ y.getD i false) :
-    ∀ i, (wires gs x).getD i false ≤ (wires gs y).getD i false := by
-  induction gs using List.reverseRecOn with
-  | nil => simpa [wires] using hxy
-  | append_singleton gs g ih =>
-    have hr := ih (fun a ha => hgs a (by simp [ha]))
-    intro i
-    by_cases hi : i < x.length + gs.length
-    · rw [wire_before gs g x hi, wire_before gs g y (by omega)]
-      exact hr i
-    by_cases he : i = x.length + gs.length
-    · have he' : i = y.length + gs.length := by omega
-      rw [he, wire_last, ← he, he', wire_last]
-      exact evalAO (hgs g (by simp)) (fun j _ => hr j)
-    · have hx : x.length + (gs ++ [g]).length ≤ i := by simp; omega
-      have hy : y.length + (gs ++ [g]).length ≤ i := by simp; omega
-      rw [wire_outside _ _ hx, wire_outside _ _ hy]
+private def reads (g : Gate) : List ℕ :=
+  if isOrdinary g then g.inputs else g.inputs.take 1
 
-private def OneNot (gs : List Gate) : Prop :=
-  gs.Pairwise fun a b => a.op ≠ .not ∨ b.op ≠ .not
+private theorem eval_reads (g : Gate) (a b : ℕ → Bool)
+    (agree : ∀ j ∈ reads g, a j = b j) :
+    g.op.eval (g.inputs.map a) = g.op.eval (g.inputs.map b) := by
+  by_cases hn : g.op = .not
+  · cases h : g.inputs with
+    | nil => simp [hn, GateOp.eval]
+    | cons j js =>
+      have eq := agree j (by simp [reads, isOrdinary, hn, h])
+      simp [hn, GateOp.eval, eq]
+  · apply congrArg g.op.eval
+    have ho : isOrdinary g = true := by cases eq : g.op <;> simp_all [isOrdinary]
+    exact List.map_congr_left (by simpa [reads, ho] using agree)
 
-private theorem earlier_AO (gs : List Gate) (g : Gate)
-    (hgs : ∀ a ∈ gs, IsAllowed a) (uniq : OneNot (gs ++ [g])) (hn : g.op = .not) :
-    ∀ a ∈ gs, IsAO a := by
-  intro a ha
-  rcases (hgs a ha).1 with h | h | h
-  · exact Or.inl h
-  · exact Or.inr h
-  · exact False.elim ((List.pairwise_append.1 uniq).2.2 a ha g (by simp) |>.elim
-      (fun F => F h) (fun F => F hn))
-
-private theorem not_eval_le {g : Gate} (hn : g.op = .not) {a b : ℕ → Bool}
-    (le : ∀ i, a i ≤ b i) : g.op.eval (g.inputs.map b) ≤ g.op.eval (g.inputs.map a) := by
-  cases h : g.inputs with
-  | nil => simp [hn, GateOp.eval]
-  | cons i _ =>
-    have hi := le i
-    simp only [hn, GateOp.eval, List.map_cons, List.headD_cons]
-    cases ha : a i <;> cases hb : b i <;> simp_all
-
-private def next (k : ℕ) (P : Finset ℕ) (g : Gate) : Finset ℕ :=
-  P.erase k ∪ (g.inputs.filter fun i => i < k).toFinset
-
-private theorem next_card (k : ℕ) (P : Finset ℕ) (g : Gate)
-    (hk : k ∈ P) (hlen : g.inputs.length ≤ 2) : (next k P g).card ≤ P.card + 1 := by
-  have h₁ := Finset.card_union_le (P.erase k) (g.inputs.filter fun i => i < k).toFinset
-  have h₂ := List.toFinset_card_le (g.inputs.filter fun i => i < k)
-  have h₃ := List.length_filter_le (fun i : ℕ => decide (i < k)) g.inputs
-  have h₄ := Finset.card_erase_add_one hk
-  unfold next
-  omega
-
-private theorem next_include {k i : ℕ} {P : Finset ℕ} {g : Gate} (hi : i ∈ g.inputs)
-    (hk : i < k) : i ∈ next k P g := by
-  exact Finset.mem_union_right _ (List.mem_toFinset.2 (by simp [hi, hk]))
-
--- Track the wires needed before each gate. A reached NOT consumes one frontier wire.
--- Increasing the inputs can only decrease the value supplied by this gate.
-private theorem frontier (n : ℕ) (gs : List Gate)
-    (allowed : ∀ g ∈ gs, IsAllowed g) (uniq : OneNot gs)
+private theorem trace (n : ℕ) (gs : List Gate)
+    (arity : ∀ g ∈ gs, g.inputs.length ≤ 2)
     (P : Finset ℕ) (bounded : ∀ i ∈ P, i < n + gs.length) :
-    ∃ (D : Finset ℕ) (usedNot : Bool),
-      (∀ i ∈ D, i < n) ∧ D.card + usedNot.toNat ≤ P.card + (gs.filter isOrdinary).length ∧
-      (∀ x y : List Bool, x.length = n → y.length = n →
-        (∀ i, x.getD i false ≤ y.getD i false) →
-        (∀ i ∈ D, x.getD i false = y.getD i false) →
-        ∀ i ∈ P, (wires gs y).getD i false ≤ (wires gs x).getD i false) ∧
-      (usedNot = false → ∀ x : List Bool, x.length = n → ∀ i ∈ P,
-        (wires gs x).getD i false = (wires (eraseNot gs) x).getD i false) := by
+    ∃ D : Finset ℕ, D.card ≤ P.card + (gs.filter isOrdinary).length ∧
+      ∀ x y : List Bool, x.length = n → y.length = n →
+      (∀ i ∈ D, x.getD i false = y.getD i false) →
+      ∀ i ∈ P, (wires gs x).getD i false = (wires gs y).getD i false := by
   induction gs using List.reverseRecOn generalizing P with
-  | nil =>
-    have hD : ∀ i ∈ P, i < n := by simpa using bounded
-    refine ⟨P, false, hD, by simp, ?_, ?_⟩
-    · intro x y _ _ _ hagree i hi
-      exact le_of_eq (hagree i hi).symm
-    · simp [wires, eraseNot]
+  | nil => exact ⟨P, by simp, fun _ _ _ _ agree => agree⟩
   | append_singleton gs g ih =>
-    have hpre : ∀ h ∈ gs, IsAllowed h := fun h hh => allowed h (by simp [hh])
-    have hg := allowed g (by simp)
-    have hu : OneNot gs := (List.pairwise_append.1 uniq).1
     let k := n + gs.length
-    have hp : ∀ i ∈ P, i ≠ k → i < k := by
-      intro i hi hne
-      have h := bounded i hi
-      simp at h
-      dsimp [k] at hne ⊢
+    let Q := if k ∈ P then P.erase k ∪ ((reads g).filter (fun i => i < k)).toFinset else P
+    have oldBound (i : ℕ) (hi : i ∈ P) (hn : i ≠ k) : i < k := by
+      have hb := bounded i hi
+      simp [k] at hb hn ⊢
       omega
-    have he : ∀ i ∈ P.erase k, i < k := fun i hi =>
-      hp i (Finset.mem_of_mem_erase hi) (Finset.ne_of_mem_erase hi)
-    have sameBefore : ∀ x : List Bool, x.length = n → ∀ i < k,
-        (wires (gs ++ [g]) x).getD i false = (wires gs x).getD i false := by
-      intro x hx i hi
-      apply wire_before
-      simpa [k, hx] using hi
-    have erasedBefore : ∀ x : List Bool, x.length = n → ∀ i < k,
-        (wires (eraseNot (gs ++ [g])) x).getD i false =
-          (wires (eraseNot gs) x).getD i false := by
-      intro x hx i hi
-      rw [show eraseNot (gs ++ [g]) = eraseNot gs ++ eraseNot [g] from by
-        simp [eraseNot, List.map_append]]
-      change (wires (eraseNot gs ++ [ _ ]) x).getD i false = _
-      apply wire_before
-      simpa [k, hx, eraseNot_length] using hi
-    have last : ∀ x : List Bool, x.length = n →
-        (wires (gs ++ [g]) x).getD k false =
-          g.op.eval (g.inputs.map fun i => (wires gs x).getD i false) := by
-      intro x hx
-      simpa [k, hx] using wire_last gs g x
-    by_cases hk : k ∈ P
-    · by_cases hn : g.op = .not
-      · obtain ⟨D, u, hD, hc, hcmp, _⟩ := ih hpre hu (P.erase k) he
-        have count := Finset.card_erase_add_one hk
-        refine ⟨D, true, hD, ?_, ?_, by simp⟩
-        · simp [List.filter_append, isOrdinary, hn]
+    have keep (i : ℕ) (hi : i ∈ P) (hne : i ≠ k) : i ∈ Q := by
+      by_cases hk : k ∈ P
+      · exact (by simpa only [Q, if_pos hk] using
+          (Finset.mem_union_left ((List.filter (fun i => decide (i < k)) (reads g)).toFinset)
+            (Finset.mem_erase.mpr ⟨hne, hi⟩)))
+      · simpa [Q, hk] using hi
+    have bounds : ∀ i ∈ Q, i < k := by
+      intro i hi
+      by_cases hk : k ∈ P
+      · simp only [Q, if_pos hk, Finset.mem_union, Finset.mem_erase,
+          List.mem_toFinset, List.mem_filter, decide_eq_true_eq] at hi
+        exact hi.elim (fun h => oldBound i h.2 h.1) (fun h => h.2)
+      · exact oldBound i (by simpa [Q,hk] using hi) (fun eq => hk (eq ▸ (by simpa [Q,hk] using hi : i ∈ P)))
+    have ar := arity g (by simp)
+    obtain ⟨D, card, sound⟩ := ih (fun h hh => arity h (by simp [hh])) Q bounds
+    refine ⟨D, ?_, ?_⟩
+    · rw [List.filter_append, List.length_append]
+      by_cases hk : k ∈ P
+      · have hu := Finset.card_union_le (P.erase k) ((reads g).filter (fun i => i < k)).toFinset
+        have hl := List.toFinset_card_le ((reads g).filter (fun i => i < k))
+        have hf := List.length_filter_le (fun i : ℕ => decide (i < k)) (reads g)
+        have he := Finset.card_erase_add_one hk
+        simp only [Q, if_pos hk] at card
+        by_cases hn : g.op = .not
+        · have hr : (reads g).length ≤ 1 := by simp [reads, isOrdinary,hn]
+          have hh : isOrdinary g = false := by simp [isOrdinary,hn]
+          simp [hh]
           omega
-        · intro x y hx hy hxy heq i hi
-          by_cases hi' : i = k
-          · rw [hi', last x hx, last y hy]
-            exact not_eval_le hn (wires_le gs (earlier_AO gs g hpre uniq hn) x y
-              (hx.trans hy.symm) hxy)
-          · have hiE : i ∈ P.erase k := Finset.mem_erase.2 ⟨hi', hi⟩
-            rw [sameBefore x hx i (he i hiE), sameBefore y hy i (he i hiE)]
-            exact hcmp x y hx hy hxy heq i hiE
-      · have ha : IsAO g := by
-          rcases hg.1 with h | h | h
-          · exact Or.inl h
-          · exact Or.inr h
-          · exact (hn h).elim
-        have ho : isOrdinary g = true := by
-          rcases ha with h | h <;> simp [isOrdinary, h]
-        have he' : ∀ i ∈ next k P g, i < k := by
-          intro i hi
-          rcases Finset.mem_union.1 hi with hi | hi
-          · exact he i hi
-          · exact (List.mem_filter.1 (List.mem_toFinset.1 hi)).2 |> of_decide_eq_true
-        obtain ⟨D, u, hD, hc, hcmp, hsame⟩ := ih hpre hu (next k P g) he'
-        have count := next_card k P g hk hg.2
-        refine ⟨D, u, hD, ?_, ?_, ?_⟩
-        · simp [List.filter_append, ho]
+        · have hh : isOrdinary g = true := by
+            cases ho : g.op <;> simp_all [isOrdinary]
+          have hr : (reads g).length ≤ 2 := by simpa [reads,hh] using ar
+          simp [hh]
           omega
-        · intro x y hx hy hxy heq i hi
-          by_cases hi' : i = k
-          · rw [hi', last x hx, last y hy]
-            apply evalAO ha
-            intro j hj
-            by_cases hj' : j < k
-            · exact hcmp x y hx hy hxy heq j (next_include hj hj')
-            · rw [wire_outside gs x (by simpa [hx, k] using Nat.le_of_not_gt hj'),
-                wire_outside gs y (by simpa [hy, k] using Nat.le_of_not_gt hj')]
-          · have hiE : i ∈ P.erase k := Finset.mem_erase.2 ⟨hi', hi⟩
-            rw [sameBefore x hx i (he i hiE), sameBefore y hy i (he i hiE)]
-            exact hcmp x y hx hy hxy heq i (Finset.mem_union_left _ hiE)
-        · intro hu' x hx i hi
-          by_cases hi' : i = k
-          · have hs : eraseNot (gs ++ [g]) = eraseNot gs ++ [g] := by
-              simp [eraseNot, ho, List.map_append]
-            rw [hi', last x hx, hs, show k = x.length + (eraseNot gs).length by
-              simp [k, hx, eraseNot_length], wire_last]
-            apply congrArg (g.op.eval)
-            apply List.map_congr_left
-            intro j hj
-            by_cases hj' : j < k
-            · exact hsame hu' x hx j (next_include hj hj')
-            · rw [wire_outside gs x (by simpa [hx, k] using Nat.le_of_not_gt hj'),
-                wire_outside (eraseNot gs) x
-                  (by simpa [hx, k, eraseNot_length] using Nat.le_of_not_gt hj')]
-          · rw [sameBefore x hx i (hp i hi hi'), erasedBefore x hx i (hp i hi hi')]
-            exact hsame hu' x hx i (Finset.mem_union_left _ (Finset.mem_erase.2 ⟨hi', hi⟩))
-    · have hp' : ∀ i ∈ P, i < k := fun i hi => hp i hi (fun h => hk (h ▸ hi))
-      obtain ⟨D, u, hD, hc, hcmp, hsame⟩ := ih hpre hu P hp'
-      refine ⟨D, u, hD, ?_, ?_, ?_⟩
-      · simp [List.filter_append]
+      · simp [Q,hk] at card
         omega
-      · intro x y hx hy hxy heq i hi
-        rw [sameBefore x hx i (hp' i hi), sameBefore y hy i (hp' i hi)]
-        exact hcmp x y hx hy hxy heq i hi
-      · intro hu' x hx i hi
-        rw [sameBefore x hx i (hp' i hi), erasedBefore x hx i (hp' i hi)]
-        exact hsame hu' x hx i hi
+    · intro x y hx hy agree i hi
+      have before := sound x y hx hy agree
+      by_cases e : i = k
+      · subst i
+        rw [show k = x.length + gs.length by simp [k,hx], wire_last,
+          show x.length + gs.length = y.length + gs.length by rw [hx,hy], wire_last]
+        apply eval_reads
+        intro j hj
+        by_cases hjk : j < k
+        · exact before j (by simp [Q, hi, hj, hjk])
+        · rw [wire_outside gs x (by simpa [hx,k] using Nat.le_of_not_gt hjk),
+            wire_outside gs y (by simpa [hy,k] using Nat.le_of_not_gt hjk)]
+      · have bound := oldBound i hi e
+        rw [wire_before gs g x (by simpa [hx,k] using bound),
+            wire_before gs g y (by simpa [hy,k] using bound)]
+        exact before i (keep i hi e)
 
 private def witness : List Gate := [⟨.or, [5, 6]⟩, ⟨.or, [4, 7]⟩, ⟨.or, [0, 1]⟩, ⟨.or, [2, 9]⟩, ⟨.and, [8, 10]⟩, ⟨.and, [3, 7]⟩, ⟨.or, [11, 12]⟩]
 
@@ -273,14 +154,6 @@ private theorem input_value {n : ℕ} (x : Fin n → Bool) (i : ℕ) :
   simp only [List.getD_eq_getElem?_getD, List.getElem?_ofFn]
   split <;> rfl
 
-private theorem compare_pair (i : Fin 7) (j : ℕ) :
-    (List.ofFn (low i)).getD j false ≤ (List.ofFn (high i)).getD j false := by
-  rw [input_value, input_value]
-  by_cases hj : j < 7
-  · simp only [dite_eq_left hj, low, high, Bool.le_iff_imp, decide_eq_true_eq]
-    exact Or.inl
-  · simp [hj]
-
 private theorem same_pair (i : Fin 7) (j : ℕ) (h : j ≠ i.val) :
     (List.ofFn (low i)).getD j false = (List.ofFn (high i)).getD j false := by
   rw [input_value, input_value]
@@ -289,23 +162,14 @@ private theorem same_pair (i : Fin 7) (j : ℕ) (h : j ≠ i.val) :
     simp [hj, low, high, hn]
   · simp [hj]
 
-private theorem erased_AO (gs : List Gate) (hgs : ∀ g ∈ gs, IsAllowed g) :
-    ∀ g ∈ eraseNot gs, IsAO g ∧ g.inputs.length ≤ 2 := by
-  intro g hg
-  obtain ⟨g', hm, rfl⟩ := List.mem_map.1 hg
-  obtain ⟨hop, hlen⟩ := hgs g' hm
-  rcases hop with ha | ho | hn
-  · simpa [isOrdinary, ha, IsAO] using hlen
-  · simpa [isOrdinary, ho, IsAO] using hlen
-  · simp [isOrdinary, hn, IsAO]
+end PEqualNP.Outside.L_meta_11918
 
--- Six binary gates can trace at most seven frontier wires. All seven inputs
--- already occupy these slots, so a reached NOT would exceed the budget.
-private theorem replacement :
+open PEqualNP.Outside.L_meta_11918 PEqualNP.CircuitLowerBounds in
+theorem PEqualNP.Outside.L_meta_11918 :
     ∀ (gates : List PEqualNP.CircuitLowerBounds.Gate) (o : ℕ), (∀ g ∈ gates, (g.op = PEqualNP.CircuitLowerBounds.GateOp.and ∨ g.op = PEqualNP.CircuitLowerBounds.GateOp.or ∨ g.op = PEqualNP.CircuitLowerBounds.GateOp.not) ∧ g.inputs.length ≤ 2) → (∀ i j : Fin gates.length, (gates.get i).op = PEqualNP.CircuitLowerBounds.GateOp.not → (gates.get j).op = PEqualNP.CircuitLowerBounds.GateOp.not → i = j) → (∀ x : Fin 7 → Bool, PEqualNP.CircuitLowerBounds.Circuit.eval ⟨gates, o⟩ (List.ofFn x) = decide (∃ i < ([0, 4, 1, 4, 2, 4, 0, 5, 1, 5, 2, 5, 3, 5, 0, 6, 1, 6, 2, 6, 3, 6] : List ℕ).length / 2, (List.ofFn x).getD (([0, 4, 1, 4, 2, 4, 0, 5, 1, 5, 2, 5, 3, 5, 0, 6, 1, 6, 2, 6, 3, 6] : List ℕ).getD (2 * i) 0) false = true ∧ (List.ofFn x).getD (([0, 4, 1, 4, 2, 4, 0, 5, 1, 5, 2, 5, 3, 5, 0, 6, 1, 6, 2, 6, 3, 6] : List ℕ).getD (2 * i + 1) 0) false = true)) → ∃ (gates' : List PEqualNP.CircuitLowerBounds.Gate) (o' : ℕ), (∀ g ∈ gates', (g.op = PEqualNP.CircuitLowerBounds.GateOp.and ∨ g.op = PEqualNP.CircuitLowerBounds.GateOp.or) ∧ g.inputs.length ≤ 2) ∧ gates'.length ≤ gates.length ∧ ∀ x : Fin 7 → Bool, PEqualNP.CircuitLowerBounds.Circuit.eval ⟨gates', o'⟩ (List.ofFn x) = decide (∃ i < ([0, 4, 1, 4, 2, 4, 0, 5, 1, 5, 2, 5, 3, 5, 0, 6, 1, 6, 2, 6, 3, 6] : List ℕ).length / 2, (List.ofFn x).getD (([0, 4, 1, 4, 2, 4, 0, 5, 1, 5, 2, 5, 3, 5, 0, 6, 1, 6, 2, 6, 3, 6] : List ℕ).getD (2 * i) 0) false = true ∧ (List.ofFn x).getD (([0, 4, 1, 4, 2, 4, 0, 5, 1, 5, 2, 5, 3, 5, 0, 6, 1, 6, 2, 6, 3, 6] : List ℕ).getD (2 * i + 1) 0) false = true) := by
-  intro gates o legal unique evaluates
-  by_cases enough : 8 ≤ gates.length
-  · refine ⟨witness, 13, by simp [witness], (by change 7 ≤ gates.length; omega), target_spec⟩
+  intro gates o legal _ evaluates
+  by_cases enough : 7 ≤ gates.length
+  · refine ⟨witness, 13, by simp [witness], enough, target_spec⟩
   by_cases hn : ∃ g ∈ gates, g.op = .not
   swap
   · refine ⟨gates, o, ?_, le_rfl, evaluates⟩
@@ -315,11 +179,6 @@ private theorem replacement :
     · exact Or.inl ha
     · exact Or.inr ho
     · exact (hn ⟨g, hg, hb⟩).elim
-  have hu : OneNot gates := List.pairwise_iff_get.2 (by
-    intro i j hij
-    by_cases hi : (gates.get i).op = .not
-    · exact Or.inr (fun hj => (ne_of_lt hij) (unique i j hi hj))
-    · exact Or.inl hi)
   have hf : ∀ x : Fin 7 → Bool, (⟨gates, o⟩ : Circuit).eval (List.ofFn x) = target x :=
     fun x => (evaluates x).trans (target_spec x).symm
   have ho : o < 7 + gates.length := by
@@ -328,34 +187,21 @@ private theorem replacement :
     change (wires gates (List.ofFn (high 0))).getD o false = _ at eq
     rw [wire_outside gates _ (by simpa using Nat.le_of_not_gt h), (pair_raises 0).2] at eq
     cases eq
-  obtain ⟨D, u, _, hc, hcmp, hsame⟩ := frontier 7 gates legal hu {o} (by simpa using ho)
-  have all : Finset.range 7 ⊆ D := by
+
+  obtain ⟨D, hc, same⟩ := trace 7 gates (fun g hg => (legal g hg).2) {o} (by simpa using ho)
+  have covered : Finset.range 7 ⊆ D := by
     intro j hj
-    by_contra hmiss
-    let i : Fin 7 := ⟨j, Finset.mem_range.1 hj⟩
-    have h := hcmp (List.ofFn (low i)) (List.ofFn (high i)) (by simp) (by simp)
-      (compare_pair i) (fun k hk => same_pair i k (by rintro rfl; exact hmiss hk)) o (by simp)
-    change (⟨gates, o⟩ : Circuit).eval (List.ofFn (high i)) ≤
-      (⟨gates, o⟩ : Circuit).eval (List.ofFn (low i)) at h
-    rw [hf, hf, (pair_raises i).2, (pair_raises i).1] at h
-    exact Bool.le_iff_imp.1 h rfl |> Bool.noConfusion
-  have hD : 7 ≤ D.card := by simpa using Finset.card_le_card all
-  obtain ⟨g, hg, hgNot⟩ := hn
+    by_contra missing
+    let i : Fin 7 := ⟨j, Finset.mem_range.mp hj⟩
+    have eq := same (List.ofFn (low i)) (List.ofFn (high i)) (by simp) (by simp)
+      (fun k hk => same_pair i k (by rintro rfl; exact missing hk)) o (by simp)
+    change (⟨gates, o⟩ : Circuit).eval (List.ofFn (low i)) =
+      (⟨gates, o⟩ : Circuit).eval (List.ofFn (high i)) at eq
+    rw [hf, hf, (pair_raises i).1, (pair_raises i).2] at eq
+    cases eq
+  have inputs : 7 ≤ D.card := by simpa using Finset.card_le_card covered
+  obtain ⟨g, hg, hop⟩ := hn
   have strict : (gates.filter isOrdinary).length < gates.length :=
-    List.length_filter_lt_length_iff_exists.2 ⟨g, hg, by simp [isOrdinary, hgNot]⟩
-  have uFalse : u = false := by
-    cases u with
-    | false => rfl
-    | true => simp at hc; omega
-  refine ⟨eraseNot gates, o, erased_AO gates legal, by simp [eraseNot_length], ?_⟩
-  intro x
-  have eq := hsame uFalse (List.ofFn x) (by simp) o (by simp)
-  change (⟨gates, o⟩ : Circuit).eval (List.ofFn x) =
-    (⟨eraseNot gates, o⟩ : Circuit).eval (List.ofFn x) at eq
-  exact eq.symm.trans (evaluates x)
-
-end PEqualNP.Outside.L_meta_11918
-
-theorem PEqualNP.Outside.L_meta_11918 :
-    ∀ (gates : List PEqualNP.CircuitLowerBounds.Gate) (o : ℕ), (∀ g ∈ gates, (g.op = PEqualNP.CircuitLowerBounds.GateOp.and ∨ g.op = PEqualNP.CircuitLowerBounds.GateOp.or ∨ g.op = PEqualNP.CircuitLowerBounds.GateOp.not) ∧ g.inputs.length ≤ 2) → (∀ i j : Fin gates.length, (gates.get i).op = PEqualNP.CircuitLowerBounds.GateOp.not → (gates.get j).op = PEqualNP.CircuitLowerBounds.GateOp.not → i = j) → (∀ x : Fin 7 → Bool, PEqualNP.CircuitLowerBounds.Circuit.eval ⟨gates, o⟩ (List.ofFn x) = decide (∃ i < ([0, 4, 1, 4, 2, 4, 0, 5, 1, 5, 2, 5, 3, 5, 0, 6, 1, 6, 2, 6, 3, 6] : List ℕ).length / 2, (List.ofFn x).getD (([0, 4, 1, 4, 2, 4, 0, 5, 1, 5, 2, 5, 3, 5, 0, 6, 1, 6, 2, 6, 3, 6] : List ℕ).getD (2 * i) 0) false = true ∧ (List.ofFn x).getD (([0, 4, 1, 4, 2, 4, 0, 5, 1, 5, 2, 5, 3, 5, 0, 6, 1, 6, 2, 6, 3, 6] : List ℕ).getD (2 * i + 1) 0) false = true)) → ∃ (gates' : List PEqualNP.CircuitLowerBounds.Gate) (o' : ℕ), (∀ g ∈ gates', (g.op = PEqualNP.CircuitLowerBounds.GateOp.and ∨ g.op = PEqualNP.CircuitLowerBounds.GateOp.or) ∧ g.inputs.length ≤ 2) ∧ gates'.length ≤ gates.length ∧ ∀ x : Fin 7 → Bool, PEqualNP.CircuitLowerBounds.Circuit.eval ⟨gates', o'⟩ (List.ofFn x) = decide (∃ i < ([0, 4, 1, 4, 2, 4, 0, 5, 1, 5, 2, 5, 3, 5, 0, 6, 1, 6, 2, 6, 3, 6] : List ℕ).length / 2, (List.ofFn x).getD (([0, 4, 1, 4, 2, 4, 0, 5, 1, 5, 2, 5, 3, 5, 0, 6, 1, 6, 2, 6, 3, 6] : List ℕ).getD (2 * i) 0) false = true ∧ (List.ofFn x).getD (([0, 4, 1, 4, 2, 4, 0, 5, 1, 5, 2, 5, 3, 5, 0, 6, 1, 6, 2, 6, 3, 6] : List ℕ).getD (2 * i + 1) 0) false = true) :=
-  PEqualNP.Outside.L_meta_11918.replacement
+    List.length_filter_lt_length_iff_exists.mpr ⟨g, hg, by simp [isOrdinary,hop]⟩
+  simp only [Finset.card_singleton] at hc
+  omega
